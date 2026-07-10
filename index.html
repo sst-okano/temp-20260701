@@ -30,122 +30,92 @@
     const ctx = canvas.getContext('2d');
     const btn = document.getElementById('micBtn');
     const status = document.getElementById('micStatus');
-
+    const W = canvas.width, H = canvas.height;
+    
     let audioCtx = null;
     let analyser = null;
     let source = null;
-    let animId = null;
     let stream = null;
-    let scrollX = 0;
-    let maxBin = null; // 22kHz に対応するビン上限
-
-    const FFT_SIZE = 2048;
-    const MAX_DISPLAY_FREQ = 22000;
-    const W = canvas.width;
-    const H = canvas.height;
-
-    // 目盛りを付ける周波数一覧
-    const LABEL_FREQS = [500, 1000, 2000, 4000, 6000, 8000, 10000, 12000, 16000, 20000, 22000];
-
-    // スペクトログラム描画用オフスクリーンバッファ
-    const offscreen = document.createElement('canvas');
-    offscreen.width = W;
-    offscreen.height = H;
-    const offCtx = offscreen.getContext('2d');
-
-    function freqToColor(value) {
-      // value: 0-255 → hsl色相（青→緑→赤）
-      const ratio = value / 255;
-      const hue = (1 - ratio) * 240; // 240=青, 0=赤
-      return `hsl(${hue}, 100%, ${10 + ratio * 50}%)`;
-    }
+    let animId = null;
+    let starting = false; // getUserMedia待ち中の二重起動防止フラグ
 
     function draw() {
       animId = requestAnimationFrame(draw);
-
-      const bufLen = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufLen);
-      analyser.getByteFrequencyData(dataArray);
-
-      // オフスクリーンを1px左にシフト
-      offCtx.drawImage(offscreen, -1, 0);
-
-      // 右端に最新の周波数列を描画（0〜maxBin の範囲を表示）
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(data);
+    
+      ctx.drawImage(canvas, -1, 0); // 1px左にスクロール
+    
       for (let i = 0; i < H; i++) {
-        // iをH→0に対応させて低周波を下に
-        const binIndex = Math.floor((H - 1 - i) / H * maxBin);
-        const value = dataArray[binIndex];
-        offCtx.fillStyle = freqToColor(value);
-        offCtx.fillRect(W - 1, i, 1, 1);
+        const v = data[Math.floor((H - 1 - i) / H * data.length)];
+        ctx.fillStyle = `rgb(${v},${v},${v})`;
+        ctx.fillRect(W - 1, i, 1, 1);
       }
-
-      // メインキャンバスに転写
-      ctx.drawImage(offscreen, 0, 0);
-      drawLabels();
+    }
+  
+    function setUIState(recording) {
+      btn.textContent = recording ? 'マイク停止' : 'マイク開始';
+      status.textContent = recording ? '録音中...' : '停止中';
+      status.style.color = recording ? 'red' : 'gray';
     }
 
-    function drawLabels() {
-      ctx.font = '10px monospace';
-      ctx.textAlign = 'left';
-      for (const freq of LABEL_FREQS) {
-        const y = H - 1 - Math.round(freq / MAX_DISPLAY_FREQ * (H - 1));
-        // 補助線
-        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(0, y + 0.5);
-        ctx.lineTo(W, y + 0.5);
-        ctx.stroke();
-        // ラベル（背景付き）
-        const label = freq >= 1000 ? `${freq / 1000}kHz` : `${freq}Hz`;
-        const tw = ctx.measureText(label).width;
-        ctx.fillStyle = 'rgba(0,0,0,0.55)';
-        ctx.fillRect(2, y - 12, tw + 6, 13);
-        ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.fillText(label, 5, y - 1);
-      }
+    function isRecording() {
+      return audioCtx !== null && audioCtx.state === 'running';
     }
 
     async function startMic() {
+      if (starting || isRecording()) return;
+      starting = true;
+
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        analyser = audioCtx.createAnalyser();
-        analyser.fftSize = FFT_SIZE;
-        analyser.smoothingTimeConstant = 0.56;
-        source = audioCtx.createMediaStreamSource(stream);
-        source.connect(analyser);
-
-        // サンプルレートから22kHz相当のビン上限を算出
-        maxBin = Math.min(
-          Math.round(MAX_DISPLAY_FREQ / (audioCtx.sampleRate / 2) * analyser.frequencyBinCount),
-          analyser.frequencyBinCount
-        );
-
-        offCtx.clearRect(0, 0, W, H);
-        draw();
-
-        btn.textContent = 'マイク停止';
-        status.textContent = '録音中...';
-        status.style.color = 'red';
-      } catch (e) {
-        status.textContent = 'マイクへのアクセスが拒否されました';
-        status.style.color = 'orange';
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            autoGainControl: false,
+            noiseSuppression: false,
+            sampleRate: 48000,
+          },
+          video:false,
+        });
+      } catch (error) {
+        starting = false;
+        if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+          alert('マイクのアクセスが拒否されました。ブラウザの設定でマイクへのアクセスを許可してください。');
+        } else {
+          alert('マイクのアクセスに失敗しました: ' + error.message);
+        }
+        return;
       }
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      draw();
+      setUIState(true);
+      starting = false;
     }
 
     function stopMic() {
-      if (animId) { cancelAnimationFrame(animId); animId = null; }
+      if (animId) {
+        cancelAnimationFrame(animId);
+        animId = null;
+      }
       if (source) { source.disconnect(); source = null; }
       if (audioCtx) { audioCtx.close(); audioCtx = null; }
       if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-      btn.textContent = 'マイク開始';
-      status.textContent = '停止中';
-      status.style.color = 'gray';
+      
+      setUIState(false);
     }
 
     btn.addEventListener('click', () => {
-      if (!animId) startMic(); else stopMic();
+      if (isRecording()) {
+        stopMic();
+      } else {
+        startMic();
+      }
     });
   </script>
 
